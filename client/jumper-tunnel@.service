@@ -1,0 +1,25 @@
+# Keeps the reverse tunnel of this host to the jump host up.
+# Instance = host account name on the jump host, e.g. jumper-tunnel@jetson.
+# Installed by install-tunnel.sh; settings in /etc/jumper-tunnel/<name>.env.
+[Unit]
+Description=Reverse SSH tunnel to the jump host (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/jumper-tunnel/%i.env
+ExecStart=/usr/bin/ssh -N -T \
+    -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile=/etc/jumper-tunnel/known_hosts \
+    -o IdentitiesOnly=yes -i /etc/jumper-tunnel/%i_ed25519 \
+    -p ${JUMPER_PORT} \
+    -R ${TUNNEL_PORT}:localhost:${LOCAL_PORT} \
+    %i@${JUMPER_HOST}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

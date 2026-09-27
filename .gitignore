@@ -1,0 +1,4 @@
+# runtime /etc volume (accounts, keys, host key) - never commit
+/etc/
+tmp/
+/jumper

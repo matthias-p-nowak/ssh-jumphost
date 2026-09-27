@@ -1,0 +1,4 @@
+root:x:0:
+sshd:x:22:
+hosts:x:1001:
+persons:x:1002:

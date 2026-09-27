@@ -1,0 +1,22 @@
+# SSH jump host (see docs/design.md).
+# Start:  docker compose up -d --build
+# Logs:   docker compose logs -f
+# Admin:  docker compose exec jumper jumper <subcommand>
+services:
+  jumper:
+    build: .
+    image: ssh-jumper
+    volumes:
+      # the only persistent state: config, accounts, public keys, host key
+      - ./etc:/etc
+    # backbone is an ipvlan network: sshd is reached directly at 192.168.1.7:22,
+    # `ports:` mappings would have no effect. The public port is set in the router.
+    networks:
+      backbone:
+        ipv4_address: 192.168.1.7
+    restart: unless-stopped
+
+networks:
+  backbone:
+    name: backbone
+    external: true

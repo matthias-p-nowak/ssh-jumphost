@@ -1,0 +1,26 @@
+# Sample ~/.ssh/config for persons using the jump host.
+# Replace <...>; one "Host <name>" block per tunnel host from the menu.
+
+# The jump host itself: `ssh jumper` shows the menu.
+Host jumper
+    HostName <public name or address of the jump host>
+    Port 22
+    User <your person account>
+    # needed for connecting from the menu; see the security note in the README
+    ForwardAgent yes
+
+# A tunnel host, reached through its tunnel port: `ssh jetson`
+Host jetson
+    HostName localhost
+    Port 22001
+    User <your user on jetson>
+    ProxyJump jumper
+    # all tunnel hosts are "localhost" on some port; keep their keys apart
+    HostKeyAlias jetson
+    ForwardAgent no
+
+# A machine in the LAN behind a tunnel host: `ssh lab-nas`
+Host lab-nas
+    HostName nas.local
+    User <your user on nas>
+    ProxyJump jetson
