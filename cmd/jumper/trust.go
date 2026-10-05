@@ -53,7 +53,7 @@ func runTrust(args []string) error {
 		return fmt.Errorf("cannot get the host key of %s via port %d (is the tunnel up?): %v", h.Name, h.Port, err)
 	}
 	fmt.Printf("%s via %s: %s %s\n", h.Name, addr, key.Type(), ssh.FingerprintSHA256(key))
-	fmt.Printf("compare on %s: ssh-keygen -lf /etc/ssh/ssh_host_%s_key.pub\n", h.Name, strings.TrimPrefix(key.Type(), "ssh-"))
+	fmt.Printf("compare on %s: ssh-keygen -lf /etc/ssh/ssh_host_%s_key.pub\n", h.Name, hostKeyFileType(key.Type()))
 
 	if !yes {
 		if !isTerminal() {
@@ -78,6 +78,20 @@ func runTrust(args []string) error {
 	}
 	fmt.Printf("trusted %s for %s\n", ssh.FingerprintSHA256(key), pattern)
 	return nil
+}
+
+// hostKeyFileType returns the part of the OpenSSH host key file name
+// (/etc/ssh/ssh_host_<part>_key.pub) for a key type, e.g. "ecdsa" for
+// "ecdsa-sha2-nistp256".
+func hostKeyFileType(keyType string) string {
+	switch {
+	case strings.HasPrefix(keyType, "ecdsa-"):
+		return "ecdsa"
+	case keyType == "ssh-dss":
+		return "dsa"
+	default: // ssh-ed25519, ssh-rsa
+		return strings.TrimPrefix(keyType, "ssh-")
+	}
 }
 
 // dropKnownHost removes the known_hosts lines for addr (host:port).

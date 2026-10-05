@@ -30,15 +30,32 @@ const noUser = "-"
 // namePattern restricts account and host names to safe Unix user names.
 var namePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
-// readHosts parses the hosts file (see docs/design.md "Hosts file").
-// Errors name the offending line; names and ports must be unique.
+// hostsConfig is the parsed hosts file.
+type hostsConfig struct {
+	Hosts      []*hostEntry
+	PublicAddr string // `public` line: address of the jump host from outside; "" = not set
+	PublicPort int    // `public` line: its port from outside
+}
+
+// readHosts returns the hosts of the hosts file.
 func readHosts() ([]*hostEntry, error) {
+	cfg, err := readHostsFile()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Hosts, nil
+}
+
+// readHostsFile parses the hosts file (see docs/design.md "Hosts file").
+// Errors name the offending line; names and ports must be unique.
+func readHostsFile() (*hostsConfig, error) {
 	f, err := os.Open(at(hostsFile))
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
+	cfg := &hostsConfig{}
 	var hosts []*hostEntry
 	byName := map[string]*hostEntry{}
 	usedPorts := map[int]string{}
@@ -89,9 +106,22 @@ func readHosts() ([]*hostEntry, error) {
 				return nil, fail("unknown host %q (lan lines must follow their host line)", fields[1])
 			}
 			h.LAN = append(h.LAN, lanEntry{Target: fields[2], Description: strings.Join(fields[3:], " ")})
+		case "public":
+			if len(fields) != 3 {
+				return nil, fail("want: public <address> <port>")
+			}
+			if cfg.PublicAddr != "" {
+				return nil, fail("duplicate public line")
+			}
+			port, err := strconv.Atoi(fields[2])
+			if err != nil || port < 1 || port > 65535 {
+				return nil, fail("port %q not in 1-65535", fields[2])
+			}
+			cfg.PublicAddr, cfg.PublicPort = fields[1], port
 		default:
 			return nil, fail("unknown keyword %q", fields[0])
 		}
 	}
-	return hosts, scanner.Err()
+	cfg.Hosts = hosts
+	return cfg, scanner.Err()
 }

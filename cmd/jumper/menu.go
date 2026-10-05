@@ -22,20 +22,28 @@ import (
 // (see docs/design.md "Menu"). Without a terminal the list is printed once.
 func runMenu(person string) error {
 	if !isTerminal() {
-		hosts, err := readHosts()
+		cfg, err := readHostsFile()
 		if err != nil {
 			return err
 		}
-		printHosts(person, hosts)
+		printHosts(person, cfg)
 		return nil
 	}
 	in := newTerminalInput()
+	// failedHost and failedErr describe the last failed connect: shown
+	// below the list, and a retry of the same host runs with diagnostics.
+	failedHost, failedErr := "", error(nil)
 	for {
-		hosts, err := readHosts()
+		cfg, err := readHostsFile()
 		if err != nil {
 			return err
 		}
-		printHosts(person, hosts)
+		hosts := cfg.Hosts
+		printHosts(person, cfg)
+		if failedErr != nil {
+			fmt.Printf("  last connect to %s failed: %v\n", failedHost, failedErr)
+			fmt.Printf("  (select %s again for diagnostics)\n\n", failedHost)
+		}
 		fmt.Print("number = connect, r = refresh, q = quit: ")
 		line, err := in.ReadLine()
 		if err != nil {
@@ -53,20 +61,26 @@ func runMenu(person string) error {
 			fmt.Printf("  no host %q\n\n", line)
 			continue
 		}
-		if err := connect(in, hosts[n-1]); err != nil {
-			fmt.Printf("  %v\n\n", err)
-		}
+		h := hosts[n-1]
+		err = connect(in, h, failedErr != nil && failedHost == h.Name)
+		failedHost, failedErr = h.Name, err
 	}
 }
 
 // printHosts prints the numbered host list with online state and the
-// ready-to-copy ssh -J lines.
-func printHosts(person string, hosts []*hostEntry) {
+// ready-to-copy ssh -J lines: complete commands for person when the hosts
+// file has a `public` line, otherwise with the `jumper` alias of the
+// sample client config.
+func printHosts(person string, cfg *hostsConfig) {
 	fmt.Printf("\njumper - logged in as %s\n\n", person)
-	if len(hosts) == 0 {
+	if len(cfg.Hosts) == 0 {
 		fmt.Println("  no hosts configured")
 	}
-	for i, h := range hosts {
+	jump := "jumper"
+	if cfg.PublicAddr != "" {
+		jump = fmt.Sprintf("%s@%s:%d", person, cfg.PublicAddr, cfg.PublicPort)
+	}
+	for i, h := range cfg.Hosts {
 		state := "offline"
 		if online(h) {
 			state = "online"
@@ -76,10 +90,14 @@ func printHosts(person string, hosts []*hostEntry) {
 		if user == "" {
 			user = "<user>"
 		}
-		fmt.Printf("       ssh -J jumper -p %d %s@localhost\n", h.Port, user)
+		if cfg.PublicAddr != "" {
+			fmt.Printf("       ssh -J %s -p %d -o HostKeyAlias=%s %s@localhost\n", jump, h.Port, h.Name, user)
+		} else {
+			fmt.Printf("       ssh -J %s -p %d %s@localhost\n", jump, h.Port, user)
+		}
 		for _, lan := range h.LAN {
 			fmt.Printf("     lan %s  %s\n", lan.Target, lan.Description)
-			fmt.Printf("       ssh -J jumper,%s@localhost:%d <user>@%s\n", user, h.Port, lan.Target)
+			fmt.Printf("       ssh -J %s,%s@localhost:%d <user>@%s\n", jump, user, h.Port, lan.Target)
 		}
 	}
 	fmt.Println()
@@ -89,27 +107,69 @@ func printHosts(person string, hosts []*hostEntry) {
 	}
 }
 
-// online reports whether the tunnel of h is up, i.e. its port accepts
-// connections on the jump host.
+// online reports whether the tunnel of h is up, i.e. sshd listens on its
+// port on the jump host. It reads the kernel socket tables instead of
+// connecting: a probe connection would go through the tunnel and count as
+// an unauthenticated connection at the target (OpenSSH PerSourcePenalties).
 func online(h *hostEntry) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", h.Port), 500*time.Millisecond)
+	for _, table := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		if listening(table, h.Port) {
+			return true
+		}
+	}
+	return false
+}
+
+// tcpListen is the state code of a listening socket in /proc/net/tcp*.
+const tcpListen = "0A"
+
+// listening reports whether the socket table at path (/proc/net/tcp
+// format: local_address "ADDR:PORT" in hex, state in hex) has a socket
+// listening on port.
+func listening(path string, port int) bool {
+	lines, err := readLines(path)
 	if err != nil {
 		return false
 	}
-	conn.Close()
-	return true
+	for _, line := range lines[min(1, len(lines)):] { // skip the header
+		f := strings.Fields(line)
+		if len(f) < 4 || f[3] != tcpListen {
+			continue
+		}
+		i := strings.LastIndexByte(f[1], ':')
+		if p, err := strconv.ParseUint(f[1][i+1:], 16, 16); err == nil && int(p) == port {
+			return true
+		}
+	}
+	return false
 }
 
 // connect opens an interactive ssh session to h through its tunnel,
-// authenticating with the person's forwarded agent.
-func connect(in *terminalInput, h *hostEntry) error {
+// authenticating with the person's forwarded agent. With verbose set,
+// each step is explained, with a hint for the step that fails.
+func connect(in *terminalInput, h *hostEntry, verbose bool) error {
+	note := func(format string, args ...any) {
+		if verbose {
+			fmt.Printf("  - "+format+"\n", args...)
+		}
+	}
+	if verbose {
+		fmt.Printf("diagnostics for %s:\n", h.Name)
+	}
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
+		note("no forwarded agent (SSH_AUTH_SOCK is empty).")
+		note("on your client, `ssh-add -l` must list your key; if it reports no agent, run")
+		note("`eval $(ssh-agent)` and `ssh-add`, then log in again with ssh -A")
 		return errors.New("connecting needs agent forwarding: log in with ssh -A")
 	}
+	note("forwarded agent: %s", sock)
 	if !online(h) {
+		note("nothing listens on port %d: the tunnel of %s is down;", h.Port, h.Name)
+		note("on %s check `systemctl status jumper-tunnel@%s`", h.Name, h.Name)
 		return fmt.Errorf("%s is offline (no tunnel on port %d)", h.Name, h.Port)
 	}
+	note("tunnel port %d is listening", h.Port)
 	user := h.User
 	for user == "" {
 		fmt.Printf("login user on %s: ", h.Name)
@@ -130,6 +190,20 @@ func connect(in *terminalInput, h *hostEntry) error {
 	}
 	defer agentConn.Close()
 	ag := agent.NewClient(agentConn)
+	if verbose {
+		keys, err := ag.List()
+		switch {
+		case err != nil:
+			note("cannot list the agent's keys: %v", err)
+		case len(keys) == 0:
+			note("the agent holds no keys: run `ssh-add` on your client")
+		default:
+			note("the agent holds %d key(s):", len(keys))
+			for _, k := range keys {
+				note("  %s %s %s", k.Type(), ssh.FingerprintSHA256(k), k.Comment)
+			}
+		}
+	}
 
 	known, err := knownhosts.New(at(knownHostsFile))
 	if err != nil {
@@ -144,14 +218,42 @@ func connect(in *terminalInput, h *hostEntry) error {
 	fmt.Printf("connecting to %s@%s ...\n", user, h.Name)
 	client, err := ssh.Dial("tcp", fmt.Sprintf("localhost:%d", h.Port), config)
 	if err != nil {
+		if verbose {
+			explainDialError(note, h, user, err)
+		}
 		return err
 	}
+	note("connected, %s runs %s", h.Name, client.ServerVersion())
 	defer client.Close()
 	// Let the person hop further from the target with the same agent.
 	if err := agent.ForwardToAgent(client, ag); err != nil {
 		return err
 	}
 	return runSession(in, client)
+}
+
+// explainDialError prints, via note, the likely cause of a failed ssh.Dial
+// to h and what to check.
+func explainDialError(note func(string, ...any), h *hostEntry, user string, err error) {
+	// x/crypto reports every handshake error as "ssh: handshake failed: ...",
+	// so the specific cases are recognised by their text first.
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "host key of "): // from hostKeyCheck
+		note("the host key check failed (see the message below); the admin compares the")
+		note("fingerprint on %s and runs `jumper trust %s`", h.Name, h.Name)
+	case strings.Contains(msg, "unable to authenticate"):
+		note("%s rejected every key of your agent for user %s:", h.Name, user)
+		note("one of them must be in ~%s/.ssh/authorized_keys on %s", user, h.Name)
+	case strings.Contains(msg, "handshake failed"):
+		note("the tunnel is up, but the far end closed the connection before the ssh handshake.")
+		note("on %s check that sshd listens where the tunnel points (-R %d:localhost:<sshd port>);", h.Name, h.Port)
+		note("its log may show `srclimit_penalise` (PerSourcePenalties blocking ::1)")
+	case strings.Contains(msg, "timeout"):
+		note("no answer within 10 s: the tunnel or %s hangs", h.Name)
+	default:
+		note("unexpected error")
+	}
 }
 
 // hostKeyCheck wraps the known_hosts check with messages that tell the

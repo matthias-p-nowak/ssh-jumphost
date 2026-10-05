@@ -3,16 +3,17 @@
 Implemented state. Design intent: `design.md`; requirements: `requests.md`.
 
 ## Repository layout
+- `README.md` — admin guide: start, add/change/remove hosts and persons, troubleshooting, command reference.
 - `Dockerfile` — 3 stages: `golang:1.26-alpine` builds `jumper` statically; `alpine:3.22` + `openssh-server` + `openssh-client-common` (for `moduli`) collects files into `/stage`; `scratch` copies `/stage`.
 - `cmd/jumper/` — Go source of the `jumper` binary (module `github.com/matthias-p-nowak/ssh-jumphost`, dependency `golang.org/x/crypto`).
   - `main.go` — subcommand dispatch; `JUMPER_ROOT` path prefix (default `/`) for tests.
   - `init.go` — `jumper init [-n]`.
-  - `hosts.go` — hosts file parser (`host`/`lan` lines, unique names and ports 1024–65535, names `^[a-z_][a-z0-9_-]{0,31}$`; default user optional, `-` or missing = none).
+  - `hosts.go` — hosts file parser (`readHostsFile` → `hostsConfig`; `readHosts` returns only the hosts; `host`/`lan` lines, optional single `public <address> <port>` (port 1–65535, used only by the menu hints), unique names and ports 1024–65535, names `^[a-z_][a-z0-9_-]{0,31}$`; default user optional, `-` or missing = none).
   - `sync.go` — `jumper sync`: writes `sshd_config.d/jumper-generated.conf` atomically, `sshd -t`, rollback on failure, SIGHUP to PID 1.
   - `accounts.go` — `jumper add person|host`, `jumper key`, `jumper remove`; edits `passwd`/`shadow` directly; `add host` appends the hosts line, `remove` drops `host`/`lan` lines (other lines and comments kept).
   - `prompt.go` — terminal questions (`golang.org/x/term` decides whether stdin is a TTY; `/dev/null` and pipes are not).
   - `shell.go` — login-shell mode (argv[0] `-jumper` or `-c`): hint for hosts; persons: `-c` refused, otherwise the menu.
-  - `menu.go` — host list (online = TCP connect to `localhost:<port>` within 500 ms), hint lines, connect: `x/crypto/ssh` client with the forwarded agent, strict check against `ssh_known_hosts`, raw pty session with SIGWINCH forwarding and agent forwarding to the target.
+  - `menu.go` — host list (online = port in LISTEN state in `/proc/net/tcp` or `/proc/net/tcp6`; no probe connection through the tunnel), hint lines, connect: `x/crypto/ssh` client with the forwarded agent, strict check against `ssh_known_hosts`, raw pty session with SIGWINCH forwarding and agent forwarding to the target. The loop keeps the last failed host and error (shown below the list); a retry of that host calls `connect` with `verbose`, which prints each step (agent socket, `agent.List` keys, listen check, server version) and, on a dial error, a hint chosen by `explainDialError` from the error text (x/crypto wraps all handshake errors as "ssh: handshake failed: ...").
   - `input.go` — one goroutine reads stdin; menu lines and session input take turns via a shared pending buffer (no keystrokes lost to a blocked reader). Session stdin is copied via `StdinPipe`, so `Wait` returns when the remote side ends.
   - `trust.go` — `jumper trust [-y] <host>`: captures the host key through the tunnel (handshake aborted), replaces the `[localhost]:<port>` entry.
 - `client/` — `jumper-tunnel@.service` (instance = host account), `install-tunnel.sh`, `ssh_config.sample`; see design.md "Client side".
@@ -41,9 +42,3 @@ Implemented state. Design intent: `design.md`; requirements: `requests.md`.
 - `backbone` is an ipvlan network: sshd is reachable only at `192.168.1.7:22`; `ports:` mappings are ignored. With ipvlan the NAS host itself usually cannot reach the container IP; test from another LAN machine.
 - The NAS docker daemon uses user-namespace remapping: container root is uid/gid 100000 on the host, so files in `etc/` are owned by 100000. Edit them via `jumper` subcommands (`docker exec`) or as root on the NAS.
 - Docker creates empty `hostname`, `hosts`, `resolv.conf` in `etc/` as mount points; they belong to docker, not to the skeleton.
-
-## Verified (2026-09-26, on xen)
-Image builds; first start seeds `/etc` and creates the host key; sshd listens on `192.168.1.7:22`; unknown user gets `Permission denied (publickey)`; host key fingerprint unchanged after `docker restart`.
-Accounts and rules (temporary `testhost`/`testalice`, since removed): host opens `-R 22001` ✓, other port refused ✓, command gets tunnel-only hint ✓, `-W` refused ✓; person `-W localhost:22001` reaches the tunnelled sshd ✓, `-W localhost:22` refused ✓, `-R` refused ✓, interactive login gets the greeting ✓; `sync` reloads sshd via SIGHUP ✓.
-Menu (temporary `testhost` = throwaway sshd on the dev machine behind a real tunnel, `testalice`; since removed, incl. known_hosts entry): `ssh -T` prints the list once ✓, a command is refused ✓, without `-A` connect is refused ✓, unknown host key refused with fingerprint ✓, `jumper trust -y` records the matching fingerprint ✓ (without `-y` and terminal refused ✓), `ssh -A -tt` → select → shell on the target ✓, agent visible on the target ✓, `exit` returns to the menu ✓, `q` quits ✓.
-Client side: `install-tunnel.sh` passes `bash -n`; the unit's ssh command line was exercised manually. Not yet run on a systemd host.

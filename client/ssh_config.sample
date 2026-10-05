@@ -9,18 +9,18 @@ Host jumper
     # needed for connecting from the menu; see the security note in the README
     ForwardAgent yes
 
-# A tunnel host, reached through its tunnel port: `ssh jetson`
-Host jetson
+# A tunnel host, reached through its tunnel port: `ssh mars`
+Host mars
     HostName localhost
-    Port 22001
-    User <your user on jetson>
+    Port 22102
+    User <your user on mars>
     ProxyJump jumper
     # all tunnel hosts are "localhost" on some port; keep their keys apart
-    HostKeyAlias jetson
+    HostKeyAlias mars
     ForwardAgent no
 
 # A machine in the LAN behind a tunnel host: `ssh lab-nas`
 Host lab-nas
     HostName nas.local
     User <your user on nas>
-    ProxyJump jetson
+    ProxyJump mars

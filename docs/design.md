@@ -1,7 +1,7 @@
 # Design
 
 How the jump host meets the requirements in `requests.md` (IDs in brackets).
-Reference for patterns: `/net/xen/lvms/nas/docker/sftp-server` (key-only sshd, first-run seeding, user helper).
+Reference for patterns: `sftp-server` (key-only sshd, first-run seeding, user helper).
 
 ## Overview
 
@@ -63,6 +63,7 @@ host  hostB     22002  pi        Raspberry Pi at home
 
 - `host <name> <port> <default-user> <description...>` — `<default-user>` is the login user on the host, used by the menu for connect and hint lines; `-` = none (the menu asks, hints show `<user>`)
 - `lan <host> <target> <description...>` — LAN target reachable via that host [R7]
+- `public <address> <port>` — optional, at most once: the address and port under which persons reach the jump host from outside (router forward). Used only for the menu's hint lines
 
 The admin edits this file; `jumper sync` and the menu read it. Ports are unique; suggested range 22001–22999.
 
@@ -140,12 +141,16 @@ Match Group persons
 **ProxyJump** [R12] — `ssh -J person@jumper -p <port> user@localhost`. `-J` opens only a `direct-tcpip` channel, no session, so no program (and no menu) runs on the jump host.
 
 **Menu** [R10, R11] — `ssh -A person@jumper` gets a pty and sshd starts the login shell `jumper`:
-1. read `/etc/jumper/hosts`; a host is *online* if a TCP connect to `localhost:<port>` succeeds
-2. print a numbered list: name, port, online/offline, description, LAN targets, and hint lines (`jumper` = the `Host` alias from the sample client config):
-   - `ssh -J jumper -p <port> <user>@localhost`
-   - LAN target: `ssh -J jumper,<user>@localhost:<port> <user>@<target>`
+1. read `/etc/jumper/hosts`; a host is *online* if its tunnel port is in LISTEN state on the jump host (`/proc/net/tcp`, `/proc/net/tcp6`). The check never connects through the tunnel: a probe connection would reach the target's sshd and, with OpenSSH ≥ 9.8 `PerSourcePenalties`, get the tunnel's source address (`::1`) blocked there
+2. print a numbered list: name, port, online/offline, description, LAN targets, and hint lines. With a `public` line, the hints are complete commands for the logged-in person:
+   - `ssh -J <person>@<address>:<public port> -p <port> -o HostKeyAlias=<host> <user>@localhost`
+   - LAN target: `ssh -J <person>@<address>:<public port>,<user>@localhost:<port> <user>@<target>`
+
+   Without it, `jumper` stands for the `Host` alias from the sample client config: `ssh -J jumper -p <port> <user>@localhost`, LAN target `ssh -J jumper,<user>@localhost:<port> <user>@<target>`
 3. prompt: number = connect, `r` = refresh, `q` = quit
 4. connect: user = default user, or asked; built-in ssh client (`golang.org/x/crypto/ssh`) to `localhost:<port>`, authenticating with the forwarded agent (`SSH_AUTH_SOCK`), interactive pty session (raw terminal, window-size changes forwarded, agent forwarded on to the target so the person can hop further); back to the menu when the session ends
+   - a failed connect is shown again below the redrawn list, with the hint to select the same host again for diagnostics
+   - selecting the host of the last failed connect again runs the same connect with each step explained (forwarded agent and its keys, tunnel port, handshake, host key, authentication) and a hint for the step that failed. It opens no extra connections to the target
 5. a person running a command (`ssh person@jumper <cmd>`) is refused; without a pty (`ssh -T`) the list is printed once
 
 Target host keys are checked strictly against the global `/etc/ssh/ssh_known_hosts` (entries `[localhost]:<port> ...`); an unknown or changed key is refused with its fingerprint shown. The admin records a key with `jumper trust <host>` (fetches the key through the tunnel, shows the fingerprint, asks for confirmation; `-y` without a terminal; replaces an older entry). Without `-A` the menu still lists hosts but says that connecting needs agent forwarding.
